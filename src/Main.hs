@@ -5,7 +5,8 @@ module Main
 import           Control.Applicative                   ((*>), (<$>))
 import           Control.Concurrent.Async
 import           Control.Monad                         (unless)
-import qualified Data.ByteString.Char8                 as ByteString
+import qualified Data.ByteString                       as ByteString
+import qualified Data.ByteString.Char8                 as ByteString8
 import           Data.Conduit
 import qualified Data.Conduit.Binary                   as Conduit.Binary
 import qualified Data.Conduit.List                     as Conduit.List
@@ -16,6 +17,7 @@ import           Data.Maybe
 import           Data.Time
 import           Distribution.PackageDescription
 import           Distribution.PackageDescription.Parsec
+import           Distribution.Types.UnqualComponentName
 import           System.Console.ANSI
 #ifndef OS_Win32
 import           System.Console.Questioner
@@ -50,59 +52,51 @@ usage = unlines [ ""
 
 setDefault :: String -> IO ()
 setDefault name = do
-    pr <- fromMaybe (error "No project root found") <$>
-        getCabalProjectRootCurrent
+    pr <- fromMaybe (error "No project root found") <$> getCabalProjectRootCurrent
     writeFile (pr </> ".stack-work" </> ".stack-run-default") name
 
 findDefault :: IO String
 findDefault = do
-    pr <- fromMaybe (error "No project root found") <$>
-        getCabalProjectRootCurrent
+    pr <- fromMaybe (error "No project root found") <$> getCabalProjectRootCurrent
     e <- doesFileExist (pr </> ".stack-work" </> ".stack-run-default")
     if e then readFile (pr </> ".stack-work" </> ".stack-run-default")
          else findDefault' pr
   where
+    findDefault' :: FilePath -> IO String
     findDefault' pr = do
-        cfp <- fromMaybe (error "No cabal file found") <$>
-            (find ((== ".cabal") . takeExtension) <$> getDirectoryContents pr)
-        getPackageDescription (pr </> cfp) >>= getDefaultExecutable
-          where
-            getPackageDescription p = parsePackageDescription <$> readFile p
-            getDefaultExecutable (ParseFailed _) =
-                error "Failed to parse cabal file"
-            getDefaultExecutable (ParseOk _ gpd) = case condExecutables gpd of
-                [] -> error "No executable found"
-                ((d, _):_) -> return d
+        cfp <- fromMaybe (error "No cabal file found") <$> (find ((== ".cabal") . takeExtension) <$> getDirectoryContents pr)
+        (_, result) <- runParseResult . parseGenericPackageDescription <$> ByteString.readFile (pr </> cfp)
+        case result of
+          Left _ -> error "No executable found"
+          Right gpd -> case condExecutables gpd of
+                         [] -> error "No executable found"
+                         ((d, _):_) -> pure $ unUnqualComponentName d
 
 getExecutables :: IO [String]
 getExecutables = do
-    pr <- fromMaybe (error "No project root found") <$>
-        getCabalProjectRootCurrent
-    cfp <- fromMaybe (error "No cabal file found") <$>
-        (find ((== ".cabal") . takeExtension) <$> getDirectoryContents pr)
-    pkgParseResult <- getPackageDescription (pr </> cfp)
-    return $ getExecutables pkgParseResult
-  where
-    getPackageDescription p = parseGenericPackageDescription <$> readFile p
-    getExecutables (ParseFailed _) =
-        error "Failed to parse cabal file"
-    getExecutables (ParseOk _ gpd) = case condExecutables gpd of
-        [] -> error "No executables found"
-        ds -> map fst ds
+    pr <- fromMaybe (error "No project root found") <$> getCabalProjectRootCurrent
+    cfp <- fromMaybe (error "No cabal file found") <$> (find ((== ".cabal") . takeExtension) <$> getDirectoryContents pr)
+
+    (_, result) <- runParseResult . parseGenericPackageDescription <$> ByteString.readFile (pr </> cfp)
+    case result of
+      Left _ -> error "Failed to parse cabal file"
+      Right gpd -> case condExecutables gpd of
+                     [] -> error "No executable found"
+                     ds -> pure $ map (unUnqualComponentName . fst) ds
 
 getCabalProjectRootCurrent :: IO (Maybe FilePath)
-getCabalProjectRootCurrent = flip catchIOError (const (return Nothing)) $
+getCabalProjectRootCurrent = flip catchIOError (const (pure Nothing)) $
   getCurrentDirectory >>= getCabalProjectRoot
   where
     getCabalProjectRoot :: FilePath -> IO (Maybe FilePath)
     getCabalProjectRoot path = do
       hasCabal <- any (isSuffixOf ".cabal") <$> getDirectoryContents path
       if hasCabal
-        then return $ Just path
+        then pure $ Just path
         else let parent = takeDirectory path in
           if parent /= path
             then getCabalProjectRoot parent
-            else return Nothing
+            else pure Nothing
 
 stackRun :: String -> [String] -> IO b
 stackRun name as = do
@@ -111,7 +105,7 @@ stackRun name as = do
     unless stackYmlExists $ do
         ec <- prettyRunCommand "stack init"
         case ec of
-            ExitSuccess -> return ()
+            ExitSuccess -> pure ()
             f -> exitWith f
     start <- getCurrentTime
     ec <- prettyRunCommand "stack build"
@@ -136,7 +130,7 @@ stackRun name as = do
         let diff :: Double
             diff = fromRational (toRational (diffUTCTime now start))
             fdiff = floor (diff * 1000)
-        return fdiff
+        pure fdiff
 
 
 prettyRunCommand :: String -> IO ExitCode
@@ -145,14 +139,14 @@ prettyRunCommand cmd = do
     logCommand cmd
     (Inherited, out, err, cph) <- streamingProcess (shell cmd)
     runConcurrently $
-        Concurrently (out $$ (Conduit.Binary.lines =$ Conduit.List.mapM_ putLineGray)) *>
-        Concurrently (err $$ (Conduit.Binary.lines =$ Conduit.List.mapM_ putLineRed)) *>
+        Concurrently (out $$ (Conduit.Binary.lines .| Conduit.List.mapM_ putLineGray)) *>
+        Concurrently (err $$ (Conduit.Binary.lines .| Conduit.List.mapM_ putLineRed)) *>
         Concurrently (waitForStreamingProcess cph)
   where
     putLineSGR sgr b = do
         hSetSGR stderr sgr
         hPutStr stderr "  "
-        ByteString.hPutStrLn stderr b
+        ByteString8.hPutStrLn stderr b
         hSetSGR stderr [Reset]
     putLineGray = putLineSGR [SetColor Foreground Dull White]
     putLineRed = putLineSGR [SetColor Foreground Vivid Black]
