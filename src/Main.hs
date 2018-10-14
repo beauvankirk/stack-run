@@ -15,7 +15,7 @@ import           Data.List.Utils
 import           Data.Maybe
 import           Data.Time
 import           Distribution.PackageDescription
-import           Distribution.PackageDescription.Parse
+import           Distribution.PackageDescription.Parsec
 import           System.Console.ANSI
 #ifndef OS_Win32
 import           System.Console.Questioner
@@ -83,7 +83,7 @@ getExecutables = do
     pkgParseResult <- getPackageDescription (pr </> cfp)
     return $ getExecutables pkgParseResult
   where
-    getPackageDescription p = parsePackageDescription <$> readFile p
+    getPackageDescription p = parseGenericPackageDescription <$> readFile p
     getExecutables (ParseFailed _) =
         error "Failed to parse cabal file"
     getExecutables (ParseOk _ gpd) = case condExecutables gpd of
